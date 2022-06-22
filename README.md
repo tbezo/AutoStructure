@@ -1,5 +1,5 @@
 # AutoStructure
-Script for automatically creating helper structures.
+ESAPI Script for automatically creating helper structures.
 
 The script adds a ring structure around the largest of the PTVs of the current plan or the
 combined/merged PTVs if there is more than one PTV referenced in the plan name. The ring 
