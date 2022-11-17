@@ -63,7 +63,7 @@ namespace VMS.TPS
 
             Structure ptvmax;
             StructureSet ss = context.StructureSet;
-            StructureCodeDictionary scd = context.StructureCodes.VmsStructCode;
+            StructureCodeDictionary scdvms = context.StructureCodes.VmsStructCode;
 
             //Plannames
             //IEnumerable<ExternalPlanSetup> ps = context.Course.ExternalPlanSetups;
@@ -79,7 +79,7 @@ namespace VMS.TPS
             IEnumerable<Structure> ptvs = GetPTVsFromPlanname(context.ExternalPlanSetup, ss);
 
             // Create merged PTV and/or find largest PTV
-            ptvmax = CreateMaxMergedPTV(ptvs, ss);
+            ptvmax = CreateMaxMergedPTV(ptvs, ss, scdvms);
             if (!ptvs.Contains(ptvmax))
             {
                 ptvs = ptvs.Concat(ss.Structures.Where(x => x.Id.StartsWith(ptvmax.Id)).ToList());
@@ -88,7 +88,7 @@ namespace VMS.TPS
             //Create loopable list of OARs to crop
             IEnumerable<Structure> oars = ss.Structures.Where(x => x.Id.StartsWith("OAR")).ToList();
             //Create OAR optimization help structures (3mm cropped)
-            CreateCroppedOARs(oars, ss, ptvmax, scd, 3.0);
+            CreateCroppedOARs(oars, ss, ptvmax, scdvms, 3.0);
 
             //Create loopable list of PRVs
             IEnumerable<Structure> prvs = ss.Structures.Where(x => x.Id.StartsWith("PRV")).ToList();
@@ -96,10 +96,10 @@ namespace VMS.TPS
             WarnOnPRVs(prvs, ss, ptvmax);
 
             //Create Ring around largest or compound PTV
-            CreateRing(ptvs, ss, scd, 3.0);
+            CreateRing(ptvs, ss, scdvms, 3.0);
 
             //Create Cropped PTVs if there are more than just one (only after cropping OARs and testing for PRVs)
-            CreateCroppedPTVs(ptvs, ss, scd, 3.0);
+            CreateCroppedPTVs(ptvs, ss, scdvms, 3.0);
         }
 
 
@@ -107,20 +107,27 @@ namespace VMS.TPS
         ///<param name="ptvs">IEnumerable containing structures that should get a ring</param>
         ///<param name="ss">Structure set to operate on</param>
         ///<returns>Merged PTV or largest one.</returns>
-        static Structure CreateMaxMergedPTV(IEnumerable<Structure> ptvs, StructureSet ss)
+        static Structure CreateMaxMergedPTV(IEnumerable<Structure> ptvs, StructureSet ss, StructureCodeDictionary scd)
         {
             Structure ptvges;
             Structure ptvmax;
-            Structure tmp;
+            Structure tmpMerge;
+
+            // test if only single PTV is in the list skip the rest
+            if (ptvs.Count() == 1)
+            {
+                return ptvs.FirstOrDefault();
+            }
 
             //create or use tmp Structure 
-            try { tmp = ss.AddStructure("CONTROL", "tmp"); }
-            catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
+            try { tmpMerge = ss.AddStructure("CONTROL", "tmp"); }
+            catch { tmpMerge = ss.Structures.Single(x => x.Id == "tmp"); }
 
             //create merged PTV 
             try
             {
                 ptvges = ss.AddStructure("PTV", "z_PTV_ges");
+                ptvges.StructureCode = scd["PTV_Low"];
             }
             catch
             {
@@ -128,24 +135,26 @@ namespace VMS.TPS
             }
 
 
-            ptvmax = ptvs.FirstOrDefault(); //start with the first PTV in List
+            ptvmax = ptvs.FirstOrDefault(); //start with the first PTV in list
 
             if (ptvges.IsEmpty) //if there is a user generated merged PTV do not change that
             {
-                foreach (Structure tptv in ptvs)
+                foreach (Structure ptv in ptvs)
                 {
-                    //search for biggest Volume (should be Last Element in List)
-                    if (tptv.Volume > ptvmax.Volume)
+                    //search for largest Volume (should be last element in list)
+                    if (ptv.Volume > ptvmax.Volume)
                     {
-                        ptvmax = tptv;
+                        ptvmax = ptv;
                     }
-                    tmp.SegmentVolume = ptvges.Or(tptv);
-                    if (ptvges.Volume < tmp.Volume)
+                    //merged structure with ptvges
+                    tmpMerge.SegmentVolume = ptvges.Or(ptv);
+                    //if merged structure is bigger use new structure as ptvges
+                    if (tmpMerge.Volume > ( ptvges.Volume - ptvges.Volume * 0.001)) // 0.001: ignore rounding errors - maybe a fixed value would be better
                     {
-                        ptvges.SegmentVolume = tmp.SegmentVolume;
+                        ptvges.SegmentVolume = tmpMerge.SegmentVolume;
                     }
-                }
-                if (ptvges.Volume > ptvmax.Volume)
+                }                
+                if (ptvmax.Volume < (ptvges.Volume - ptvges.Volume * 0.001) ) // 0.001: ignore rounding errors - maybe a fixed value would be better
                 {
                     ptvmax = ptvges;
                     //ptvs = ptvs.Concat(ss.Structures.Where(x => x.Id.StartsWith("z_PTV_ges")).ToList());
@@ -157,7 +166,7 @@ namespace VMS.TPS
                 ptvmax = ptvges;
             }
 
-            ss.RemoveStructure(tmp);
+            ss.RemoveStructure(tmpMerge);
             //Test on more than one PTV is now done before method call
             //else // if there is only one PTV and no user provided z_PTVges
             //{
@@ -179,7 +188,7 @@ namespace VMS.TPS
             Color ringColor = Color.FromArgb(255, 255, 165, 0);
 
             //Regex that matches on PTV number and removes trailing date etc, also matches z_PTV_ges
-            Regex ptvreg1 = new Regex(@"PTV_(\d?[A-z]+)", RegexOptions.Compiled);
+            Regex ptvreg1 = new Regex(@"PTV_(\d?[A-Za-z]+)", RegexOptions.Compiled);
 
             //Use only largest (compound) PTV to create a ring for the plan.
             Structure tptv = ptvs.OrderByDescending(x => x.Volume).FirstOrDefault();
@@ -188,7 +197,7 @@ namespace VMS.TPS
             string ptvid = ptvmatch.Groups[1].Value;
             if (ptvid == "")
             {
-                MessageBox.Show("Falsch benanntes PTV gefunden!");
+                MessageBox.Show("Found wrongly named PTV!");
                 return;
             }
             try
@@ -253,7 +262,7 @@ namespace VMS.TPS
             {
                 //get parent id
                 string tmpname = GetParentId(ptvs, tptv.Id);
-                //if partent was found crop it
+                //if parent was found crop it
                 if (tmpname != "")
                 {
                     //Structure parentPtv = ss.Structures.FirstOrDefault(x => x.Id.Equals(tmpname));
@@ -394,8 +403,8 @@ namespace VMS.TPS
                     scount++;
                 }
             }
-            if (message != "" && scount > 1) { MessageBox.Show("Strukturen " + message + " überlappen mit einem PTV"); }
-            else if (message != "" && scount == 1) { MessageBox.Show("Struktur " + message + " überlappt mit einem PTV"); }
+            if (message != "" && scount > 1) { MessageBox.Show("Structures " + message + " overlap with PTV"); }
+            else if (message != "" && scount == 1) { MessageBox.Show("Structure " + message + " overlaps with PTV"); }
 
             ss.RemoveStructure(tmp);
         }
@@ -426,7 +435,7 @@ namespace VMS.TPS
             // else if plan id lists all PTVs individually (c1A1BA1CBA1DCBA)
             else
             {
-                string pattern = @"\d[A-Z]+";
+                string pattern = @"\d[A-Z]+(?![a-z])"; // (?![a-z]) keeps from matching on XGy (X = Number) in the plan id
                 foreach (Match m in Regex.Matches(ps.Id, pattern))
                 {
                     ids.Add(m.Value.ToString());
@@ -445,7 +454,7 @@ namespace VMS.TPS
                     catch (Exception)
                     {
                         //MessageBox.Show("Mehr als ein PTV mit Id PTV_" + id + " gefunden.");
-                        throw new Exception("Mehr als ein PTV mit Id PTV_" + id + " gefunden. Bitte altes PTV umbenennen (z.B. z_PTV_" + id + ")");
+                        throw new Exception("Found more than one PTV with Id PTV_" + id + ". Please rename old PTV (a.e. to z_PTV_" + id + ")");
                     }
                     if (!ptvs.Contains(smatch))
                     {
@@ -454,9 +463,18 @@ namespace VMS.TPS
                 }
                 else
                 {
-                    MessageBox.Show("Keine Struktur mit Id PTV_" + id + " gefunden!");
+                    MessageBox.Show("No structure found with Id PTV_" + id + "!");
                 }
 
+            }
+
+            try
+            {
+                ptvs.First();
+            }
+            catch (Exception)
+            {
+                throw new Exception("No PTVs found matching plan name!");
             }
             return ptvs;
         }
