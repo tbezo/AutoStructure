@@ -301,12 +301,21 @@ namespace VMS.TPS
         {
             Structure tmpoar;
             Structure tmp;
+            List<string> highresstructs = new List<string>();
+
             try { tmp = ss.AddStructure("CONTROL", "tmp"); }
             catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
 
             foreach (Structure str in oars)
             {
-                //Test if volumes overlap with or are within 3mm of PTV
+                //Check for high resolution structures and later warn about them, an alternative would be to convert so normal resolution
+                if (str.IsHighResolution)
+                {
+                    highresstructs.Add(str.Id);
+                    continue;
+                }
+
+                //Test if volumes overlap with or are within 3mm of PTV             
                 tmp.SegmentVolume = ptvcrop.And(str.Margin(cropmm));
                 if (tmp.Volume != 0.0 && !(str.Id.Contains("Spinal") || str.Id.Contains("HS") || str.Id.Contains("Opt") || str.Id.Contains("Chia"))) //nerves do not get cropped!
                 {
@@ -329,6 +338,10 @@ namespace VMS.TPS
                 }
             }
             ss.RemoveStructure(tmp);
+            if (highresstructs.Any())
+            {
+                MessageBox.Show("List of ignored high resolution OARs: " + string.Join(", ", highresstructs));
+            }
         }
 
 
@@ -387,9 +400,9 @@ namespace VMS.TPS
         /// <param name="ptvmax">Largest PTV or compound PTV from Plan</param>
         static void WarnOnPRVs(IEnumerable<Structure> prvs, StructureSet ss, Structure ptvmax)
         {
-            string message = "";
-            int scount = 0;
+            List<string> warn_prv = new List<string>();
             Structure tmp;
+
             try { tmp = ss.AddStructure("CONTROL", "tmp"); }
             catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
 
@@ -398,14 +411,21 @@ namespace VMS.TPS
                 tmp.SegmentVolume = ptvmax.And(str);
                 if (tmp.Volume != 0.0)
                 {
-                    if (scount > 0) { message += ", "; }
-                    message += str.Id;
-                    scount++;
+                    warn_prv.Add(str.Id);
                 }
             }
-            if (message != "" && scount > 1) { MessageBox.Show("Structures " + message + " overlap with PTV"); }
-            else if (message != "" && scount == 1) { MessageBox.Show("Structure " + message + " overlaps with PTV"); }
 
+            if (warn_prv.Any())
+            {
+                if(warn_prv.Count() > 1)
+                {
+                    MessageBox.Show("Structures " + string.Join(", ", warn_prv) + " overlap with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+                else
+                {
+                    MessageBox.Show("Structure " + string.Join(", ", warn_prv) + " overlaps with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
+            }
             ss.RemoveStructure(tmp);
         }
 
