@@ -65,17 +65,7 @@ namespace VMS.TPS
             StructureSet ss = context.StructureSet;
             StructureCodeDictionary scdvms = context.StructureCodes.VmsStructCode;
 
-            //Plannames
-            //IEnumerable<ExternalPlanSetup> ps = context.Course.ExternalPlanSetups;
-            
-            //List<Structure> l = GetPTVsFromPlanname(ps, ss);
-            //foreach (Structure il in l)
-            //{
-            //    MessageBox.Show("Struktur mit Id: " + il.Id.ToString() + " in Liste gefunden.");
-            //}
-
             //Create loopable list of PTVs
-            //IEnumerable<Structure> ptvs = ss.Structures.Where(x => x.Id.StartsWith("PTV")).OrderBy(y => y.Volume).ToList();
             IEnumerable<Structure> ptvs = GetPTVsFromPlanname(context.ExternalPlanSetup, ss);
 
             // Create merged PTV and/or find largest PTV
@@ -87,6 +77,7 @@ namespace VMS.TPS
 
             //Create loopable list of OARs to crop
             IEnumerable<Structure> oars = ss.Structures.Where(x => x.Id.StartsWith("OAR")).ToList();
+
             //Create OAR optimization help structures (3mm cropped)
             CreateCroppedOARs(oars, ss, ptvmax, scdvms, 3.0);
 
@@ -112,6 +103,7 @@ namespace VMS.TPS
             Structure ptvges;
             Structure ptvmax;
             Structure tmpMerge;
+            Structure tmpPtv;
 
             // test if only single PTV is in the list skip the rest
             if (ptvs.Count() == 1)
@@ -119,35 +111,43 @@ namespace VMS.TPS
                 return ptvs.FirstOrDefault();
             }
 
-            //create or use tmp Structure 
-            try { tmpMerge = ss.AddStructure("CONTROL", "tmp"); }
-            catch { tmpMerge = ss.Structures.Single(x => x.Id == "tmp"); }
+            //create or use tmp Structures 
+            try { tmpMerge = ss.AddStructure("CONTROL", "tmpMerge"); }
+            catch { tmpMerge = ss.Structures.Single(x => x.Id == "tmpMerge"); }
+            try { tmpPtv = ss.AddStructure("CONTROL", "tmpPtv"); }
+            catch { tmpPtv = ss.Structures.Single(x => x.Id == "tmpPtv"); }
 
-            //create merged PTV 
+            //create merge PTV 
             try
             {
                 ptvges = ss.AddStructure("PTV", "z_PTV_ges");
                 ptvges.StructureCode = scd["PTV_Low"];
             }
-            catch
+            catch { ptvges = ss.Structures.Single(x => x.Id == "z_PTV_ges"); }
+
+            if (ptvs.Where(x => x.IsHighResolution).Any())
             {
-                ptvges = ss.Structures.Single(x => x.Id == "z_PTV_ges");
+                ptvges.ConvertToHighResolution();
+                tmpMerge.ConvertToHighResolution();
+                tmpPtv.ConvertToHighResolution();
             }
 
-
-            ptvmax = ptvs.FirstOrDefault(); //start with the first PTV in list
+            // select largest PTV 
+            ptvmax = ptvs.OrderByDescending(x => x.Volume).FirstOrDefault();
 
             if (ptvges.IsEmpty) //if there is a user generated merged PTV do not change that
             {
                 foreach (Structure ptv in ptvs)
                 {
-                    //search for largest Volume (should be last element in list)
-                    if (ptv.Volume > ptvmax.Volume)
+                    //merge ptv with ptvges
+                    if (ptvges.IsHighResolution && !ptv.IsHighResolution)
                     {
-                        ptvmax = ptv;
+                        tmpPtv.SegmentVolume = ptv.SegmentVolume;
+                        tmpPtv.ConvertToHighResolution();
+                        tmpMerge.SegmentVolume = ptvges.Or(tmpPtv);
                     }
-                    //merged structure with ptvges
-                    tmpMerge.SegmentVolume = ptvges.Or(ptv);
+                    else { tmpMerge.SegmentVolume = ptvges.Or(ptv); }     
+                    
                     //if merged structure is bigger use new structure as ptvges
                     if (tmpMerge.Volume > ( ptvges.Volume - ptvges.Volume * 0.001)) // 0.001: ignore rounding errors - maybe a fixed value would be better
                     {
@@ -165,14 +165,8 @@ namespace VMS.TPS
             {
                 ptvmax = ptvges;
             }
-
             ss.RemoveStructure(tmpMerge);
-            //Test on more than one PTV is now done before method call
-            //else // if there is only one PTV and no user provided z_PTVges
-            //{
-            //    ss.RemoveStructure(ptvges);
-            //}
-
+            ss.RemoveStructure(tmpPtv);
             return ptvmax; //which is either a merged PTV or a user generated z_PTV_ges
         }
 
@@ -184,6 +178,7 @@ namespace VMS.TPS
         /// <param name="scd">Structure Code Dictionary to create Structure Code from</param>
         static void CreateRing(IEnumerable<Structure> ptvs, StructureSet ss, StructureCodeDictionary scd, double cropmm)
         {
+            Structure tmp;
             Structure tmpring;
             Color ringColor = Color.FromArgb(255, 255, 165, 0);
 
@@ -200,50 +195,44 @@ namespace VMS.TPS
                 MessageBox.Show("Found wrongly named PTV!");
                 return;
             }
-            try
-            {
-                tmpring = ss.AddStructure("CONTROL", "z_Ring_" + ptvid); //does not exist yet
-            }
-            catch
-            {
-                tmpring = ss.Structures.FirstOrDefault(x => x.Id == "z_Ring_" + ptvid); //already exists
-            }
+            
+            try { tmpring = ss.AddStructure("CONTROL", "z_Ring_" + ptvid); } //does not exist yet
+            catch { tmpring = ss.Structures.FirstOrDefault(x => x.Id == "z_Ring_" + ptvid); } //already exists
+
             if (tmpring.IsEmpty)
             {
-                tmpring.SegmentVolume = tmpring.Or(tptv.Margin(20.0));
-                //Crop PTV and any child PTVs from ring with larger distance
-                foreach (Structure cptv in ptvs)
+                //if there are high resolution PTVs, create a high resolution ring
+                if (ptvs.Where(x => x.IsHighResolution).Any())
                 {
-                    tmpring.SegmentVolume = tmpring.Sub(cptv.Margin(cropmm + 2.0 * GetParentCount(ptvs, cptv.Id)));
+                    try { tmp = ss.AddStructure("CONTROL", "tmp"); }
+                    catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
+                    tmpring.ConvertToHighResolution();
+
+                    tmp.SegmentVolume = tptv.SegmentVolume;
+                    if (!tmp.IsHighResolution) { tmp.ConvertToHighResolution(); }
+                    tmpring.SegmentVolume = tmpring.Or(tmp.Margin(20.0));
+
+                    //Crop PTV and any child PTVs from ring with larger distance
+                    foreach (Structure cptv in ptvs)
+                    {
+                        tmp.SegmentVolume = cptv.SegmentVolume; // how timeconsuming is it to convert to high resolution?
+                        if (!tmp.IsHighResolution) { tmp.ConvertToHighResolution(); }
+                        tmpring.SegmentVolume = tmpring.Sub(tmp.Margin(cropmm + 2.0 * GetParentCount(ptvs, cptv.Id)));
+                    }
+                    ss.RemoveStructure(tmp);
+                }
+                else
+                {
+                    tmpring.SegmentVolume = tmpring.Or(tptv.Margin(20.0));
+                    //Crop PTV and any child PTVs from ring with larger distance
+                    foreach (Structure cptv in ptvs)
+                    {
+                        tmpring.SegmentVolume = tmpring.Sub(cptv.Margin(cropmm + 2.0 * GetParentCount(ptvs, cptv.Id)));
+                    }
                 }
                 tmpring.Color = ringColor;
-                tmpring.StructureCode = scd["Ring"];
+                tmpring.StructureCode = scd["Ring"];                
             }
-
-            //Codeblock might be interessting for SRS Structures or 
-            //    Match ptvmatch = ptvreg1.Match(tptv.Id);
-            //    string ptvid = ptvmatch.Groups[1].Value;
-            //    if (ptvid == "")
-            //    {
-            //        MessageBox.Show("Falsch benanntes PTV gefunden!");
-            //        break;
-            //    }
-            //    try
-            //    {
-            //        tmpring = ss.AddStructure("CONTROL", "z_Ring_" + ptvid); //does not exist yet
-            //    }
-            //    catch
-            //    {
-            //        tmpring = ss.Structures.FirstOrDefault(x => x.Id == "z_Ring_" + ptvid); //already exists
-            //    }
-            //    if (tmpring.IsEmpty)
-            //    {
-            //        tmpring.SegmentVolume = tmpring.Or(tptv.Margin(20.0));
-            //        tmpring.SegmentVolume = tmpring.Sub(tptv.Margin(cropmm));
-            //        tmpring.Color = ringColor;
-            //        tmpring.StructureCode = scd["Ring"];
-            //    }
-            //}
         }
     
         /// <summary>
@@ -256,6 +245,7 @@ namespace VMS.TPS
         static void CreateCroppedPTVs(IEnumerable<Structure> ptvs, StructureSet ss, StructureCodeDictionary scd, double cropmm)
         {
             Structure zptv;
+            Structure tmp;
 
             //Create optimization structures from PTVs
             foreach (Structure tptv in ptvs)
@@ -276,13 +266,62 @@ namespace VMS.TPS
                     {
                         zptv = ss.Structures.FirstOrDefault(x => x.Id == "z_" + tmpname);
                     }
+
                     if (zptv.IsEmpty)
                     {
-                        zptv.SegmentVolume = parentPtv.Sub(tptv.Margin(cropmm));
-                        if (ptvs.Any(x => x.Id.Equals("z_PTV_ges")) && Regex.IsMatch(tptv.Id, @"^PTV_\d[A-Z]{2}"))
+                        // handle situation where one ptv is in high resolution and not the other
+                        if (parentPtv.IsHighResolution ^ tptv.IsHighResolution)
+                        {
+                            try { tmp = ss.AddStructure("CONTROL", "tmp"); }
+                            catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
+
+                            if (!tptv.IsHighResolution)
+                            {
+                                zptv.SegmentVolume = tptv.SegmentVolume;
+                                zptv.SegmentVolume = tptv.Margin(cropmm);
+                                zptv.ConvertToHighResolution();
+                            }
+                            else 
+                            {
+                                zptv.ConvertToHighResolution();
+                                zptv.SegmentVolume = tptv.Margin(cropmm);
+                            }
+                            if (!parentPtv.IsHighResolution) 
+                            {
+                                tmp.SegmentVolume = parentPtv.SegmentVolume;
+                                tmp.ConvertToHighResolution();
+                            }
+                            else
+                            {
+                                tmp.ConvertToHighResolution();
+                                tmp.SegmentVolume = parentPtv.SegmentVolume;
+                            }
+                            zptv.SegmentVolume = tmp.Sub(zptv);
+                            ss.RemoveStructure(tmp);
+                        }
+                        else { zptv.SegmentVolume = parentPtv.Sub(tptv.Margin(cropmm)); } // both have same resolution
+                        
+                        if (ptvs.Any(x => x.Id.Equals("z_PTV_ges")) && Regex.IsMatch(tptv.Id, @"^PTV_\d[A-Z]{2}")) // would not crop PTV_1CBA from z_PTV_ges!
                         {
                             Structure tges = ptvs.FirstOrDefault(x => x.Id.Equals("z_PTV_ges"));
-                            tges.SegmentVolume = tges.Sub(tptv.Margin(cropmm));
+                            if (tges.IsHighResolution ^ tptv.IsHighResolution)
+                            {
+                                try { tmp = ss.AddStructure("CONTROL", "tmp"); }
+                                catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
+
+                                if (tges.IsHighResolution)
+                                {
+                                    tmp.SegmentVolume = tptv.SegmentVolume;
+                                    tmp.ConvertToHighResolution();
+                                    tges.SegmentVolume = tges.Sub(tmp.Margin(cropmm));
+                                }
+                                if (tptv.IsHighResolution)
+                                {
+                                    tges.ConvertToHighResolution();
+                                    tges.SegmentVolume = tges.Sub(tptv.Margin(cropmm));
+                                }
+                            }
+                            else { tges.SegmentVolume = tges.Sub(tptv.Margin(cropmm)); }
                         }
                     }
                 }
@@ -299,51 +338,48 @@ namespace VMS.TPS
         /// <param name="cropmm">Millimeter to crop</param>
         static void CreateCroppedOARs(IEnumerable<Structure> oars, StructureSet ss, Structure ptvcrop, StructureCodeDictionary scd, double cropmm)
         {
-            Structure tmpoar;
             Structure tmp;
-            List<string> highresstructs = new List<string>();
+            Structure tmpPtv;
 
             try { tmp = ss.AddStructure("CONTROL", "tmp"); }
             catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
+            try { tmpPtv = ss.AddStructure("CONTROL", "tmpPtv"); }
+            catch { tmpPtv = ss.Structures.Single(x => x.Id == "tmpPtv"); }
 
-            foreach (Structure str in oars)
+            // loop for all non high resolution OARs
+            if(oars.Where(x => !x.IsHighResolution).Any())
             {
-                //Check for high resolution structures and later warn about them, an alternative would be to convert so normal resolution
-                if (str.IsHighResolution)
+                if (ptvcrop.IsHighResolution)
                 {
-                    highresstructs.Add(str.Id);
-                    continue;
+                    tmpPtv.SegmentVolume = HightoLow(ss, ptvcrop);
                 }
+                else { tmpPtv.SegmentVolume = ptvcrop.SegmentVolume; }
 
-                //Test if volumes overlap with or are within 3mm of PTV             
-                tmp.SegmentVolume = ptvcrop.And(str.Margin(cropmm));
-                if (tmp.Volume != 0.0 && !(str.Id.Contains("Spinal") || str.Id.Contains("HS") || str.Id.Contains("Opt") || str.Id.Contains("Chia"))) //nerves do not get cropped!
+                foreach (Structure str in oars.Where(x => !x.IsHighResolution))
                 {
-                    //MessageBox.Show("Struktur " + str.Id + " überlappt");
-                    try
-                    {
-                        tmpoar = ss.AddStructure("CONTROL", "z_" + str.Id.Substring(4));
-                        tmpoar.Color = str.Color;
-                        tmpoar.StructureCode = scd["Control"];
-                    }
-                    catch
-                    {
-                        tmpoar = ss.Structures.FirstOrDefault(x => x.Id == "z_" + str.Id.Substring(4));
-                    }
-                    if (tmpoar.IsEmpty)
-                    {
-                        tmpoar.SegmentVolume = str.Sub(ptvcrop.Margin(cropmm));
-                        if (tmpoar.IsEmpty) { ss.RemoveStructure(tmpoar); } //if help structure is empty we can remove it
-                    }
+                    CreateCroppedStr(tmp, tmpPtv, str, ss, scd);
+                }
+            }
+
+            // loop for high resolution OARs
+            if(oars.Where(x => x.IsHighResolution).Any())
+            {
+                if (!ptvcrop.IsHighResolution)
+                {
+                    tmpPtv.SegmentVolume = ptvcrop.SegmentVolume;
+                    tmpPtv.ConvertToHighResolution();
+                }
+                else { tmpPtv.SegmentVolume = ptvcrop.SegmentVolume; }
+                tmp.ConvertToHighResolution();
+
+                foreach (Structure str in oars.Where(x => x.IsHighResolution))
+                {
+                    CreateCroppedStr(tmp, tmpPtv, str, ss, scd);                   
                 }
             }
             ss.RemoveStructure(tmp);
-            if (highresstructs.Any())
-            {
-                MessageBox.Show("List of ignored high resolution OARs: " + string.Join(", ", highresstructs));
-            }
+            ss.RemoveStructure(tmpPtv);
         }
-
 
         /// <summary>
         /// Returns the number of parents the given ptv has in the provided list of PTVs.
@@ -398,34 +434,73 @@ namespace VMS.TPS
         /// <param name="prvs">List of PRV Structures</param>
         /// <param name="ss">Used Structureset</param>
         /// <param name="ptvmax">Largest PTV or compound PTV from Plan</param>
-        static void WarnOnPRVs(IEnumerable<Structure> prvs, StructureSet ss, Structure ptvmax)
+        static void WarnOnPRVs(IEnumerable<Structure> prvs, StructureSet ss, Structure ptvmax, bool silent=false)
         {
             List<string> warn_prv = new List<string>();
             Structure tmp;
+            Structure ptvmax_alt;
 
             try { tmp = ss.AddStructure("CONTROL", "tmp"); }
             catch { tmp = ss.Structures.Single(x => x.Id == "tmp"); }
 
-            foreach (Structure str in prvs)
+            try { ptvmax_alt = ss.AddStructure("CONTROL", "ptvmax_alt"); }
+            catch { ptvmax_alt = ss.Structures.Single(x => x.Id == "ptvmax_alt"); }
+
+            // handle different resolutions of PTV and PRVs, keep number of high resolution structures low
+            if (prvs.Where(x => !x.IsHighResolution).Any())
             {
-                tmp.SegmentVolume = ptvmax.And(str);
-                if (tmp.Volume != 0.0)
+                if (ptvmax.IsHighResolution)
                 {
-                    warn_prv.Add(str.Id);
+                    ptvmax_alt.SegmentVolume = HightoLow(ss, ptvmax);
+                }
+                else { ptvmax_alt.SegmentVolume = ptvmax.SegmentVolume; }
+                // check for overlap
+                foreach (Structure prv in prvs.Where(x => !x.IsHighResolution))
+                {
+                    tmp.SegmentVolume = ptvmax_alt.And(prv);
+                    if (tmp.Volume != 0.0)
+                    {
+                        warn_prv.Add(prv.Id);
+                    }
+                }
+            }
+            if (prvs.Where(x => x.IsHighResolution).Any())
+            {
+                tmp.ConvertToHighResolution();
+                if (!ptvmax.IsHighResolution)
+                {
+                    ptvmax_alt.SegmentVolume = ptvmax.SegmentVolume;
+                    ptvmax_alt.ConvertToHighResolution();
+                }
+                else { ptvmax_alt.SegmentVolume = ptvmax.SegmentVolume; }
+                // check for overlap
+                foreach (Structure hrprv in prvs.Where(x => x.IsHighResolution))
+                {
+                    tmp.SegmentVolume = ptvmax_alt.And(hrprv);
+                    if (tmp.Volume != 0.0)
+                    {
+                        warn_prv.Add(hrprv.Id);
+                    }
                 }
             }
 
-            if (warn_prv.Any())
+            if(!silent)
             {
-                if(warn_prv.Count() > 1)
+                if (warn_prv.Any())
                 {
-                    MessageBox.Show("Structures " + string.Join(", ", warn_prv) + " overlap with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
-                }
-                else
-                {
-                    MessageBox.Show("Structure " + string.Join(", ", warn_prv) + " overlaps with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    if (warn_prv.Count() > 1)
+                    {
+                        MessageBox.Show("Structures " + string.Join(", ", warn_prv) + " overlap with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
+                    else
+                    {
+                        MessageBox.Show("Structure " + string.Join(", ", warn_prv) + " overlaps with PTV.", "PRV Warning", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    }
                 }
             }
+
+            //remove structures not used anymore
+            ss.RemoveStructure(ptvmax_alt);
             ss.RemoveStructure(tmp);
         }
 
@@ -498,5 +573,90 @@ namespace VMS.TPS
             }
             return ptvs;
         }
+
+        /// <summary>
+        /// Function to convert high resolution structures to normal/low resolution. Function takes some time, try to avoid.
+        /// Originally from https://www.reddit.com/r/esapi/comments/mbbxa3/low_and_high_resolution_structures/
+        /// </summary>
+        /// <param name="ss">structureset to operate on</param>
+        /// <param name="str">structure to convert</param>
+        /// <returns>Structure SegementVolume in normal resolution</returns>
+        static SegmentVolume HightoLow(StructureSet ss, Structure str)
+        {
+            Structure lowresstructure = ss.AddStructure("CONTROL", str.Id + "_lr");
+            SegmentVolume lowresvolume;
+
+            System.Windows.Media.Media3D.Rect3D mesh = str.MeshGeometry.Bounds;
+            int meshLow = GetSlice(mesh.Z, ss);
+            int meshUp = GetSlice(mesh.Z + mesh.SizeZ, ss) + 1;
+
+            for (int j = meshLow; j <= meshUp; j=j+3) // do not use all segments for more speed
+            {
+                VVector[][] contours = str.GetContoursOnImagePlane(j);
+                if (contours.Any())
+                {
+                    foreach (VVector[] segment in contours) { lowresstructure.AddContourOnImagePlane(segment, j); }
+                }
+            }
+
+            lowresvolume = lowresstructure.SegmentVolume;
+            ss.RemoveStructure(lowresstructure);
+            return lowresvolume;
+        }
+
+        /// <summary>
+        /// In which Slice this VVector is? It depends on the image and Structure set you are accessing. 
+        /// From https://jhmcastelo.medium.com/tips-for-vvectors-and-structures-in-esapi-575bc623074a
+        /// </summary>
+        /// <param name="z">z-coordinate from vector</param>
+        /// <param name="SS">Structureset</param>
+        /// <returns>Slicenumber</returns>
+        static int GetSlice(double z, StructureSet ss)
+        {
+            var imageRes = ss.Image.ZRes;
+            return Convert.ToInt32((z - ss.Image.Origin.z) / imageRes);
+        }
+
+        /// <summary>
+        /// Method to create a cropped structure if two structures overlap or are within margin of each other. Nerves are ignored.
+        /// </summary>
+        /// <param name="tmp">Temporary structure to work with</param>
+        /// <param name="tmpPtv">PTV to test overlap with</param>
+        /// <param name="str">Structure to test overlap</param>
+        /// <param name="ss">Structureset to work with</param>
+        /// <param name="scd">Structure code Dictionary</param>
+        /// <param name="cropmm">Additional distance in mm from PTV to test</param>
+        /// <returns>True if structure was created, false if Structures do not overlap or are not within margin.</returns>
+        static bool CreateCroppedStr(Structure tmp, Structure tmpPtv, Structure str, StructureSet ss, StructureCodeDictionary scd, double cropmm=3)
+        {
+            Structure zoar;          
+
+            tmp.SegmentVolume = tmpPtv.And(str.Margin(cropmm));
+            if (tmp.Volume != 0.0 && !(str.Id.Contains("Spinal") || str.Id.Contains("HS") || str.Id.Contains("Opt") || str.Id.Contains("Chia"))) //nerves do not get cropped!
+            {
+                try
+                {
+                    zoar = ss.AddStructure("CONTROL", "z_" + str.Id.Substring(4));
+                    zoar.Color = str.Color;
+                    zoar.StructureCode = scd["Control"];
+                }
+                catch
+                {
+                    zoar = ss.Structures.FirstOrDefault(x => x.Id == "z_" + str.Id.Substring(4));
+                }
+                if (zoar.IsEmpty && !zoar.IsApproved)
+                {
+                    zoar.SegmentVolume = str.Sub(tmpPtv.Margin(cropmm));
+                    if (zoar.IsEmpty) 
+                    { 
+                        ss.RemoveStructure(zoar);
+                        return false;
+                    } //if z_OAR is still empty we can remove it
+                }
+                return true;
+            }
+            return false;
+        }
+
     }
 }

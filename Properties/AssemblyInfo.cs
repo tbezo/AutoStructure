@@ -7,7 +7,7 @@ using System.Runtime.InteropServices;
 // set of attributes. Change these attribute values to modify the information
 // associated with an assembly.
 [assembly: AssemblyTitle("AutoStructures")]
-[assembly: AssemblyDescription("script to add  structures for optimization")]
+[assembly: AssemblyDescription("script to add structures for optimization")]
 [assembly: AssemblyConfiguration("")]
 [assembly: AssemblyCompany("Universitätsmedizin Mainz")]
 [assembly: AssemblyProduct("AutoStructure.Properties")]
@@ -30,6 +30,6 @@ using System.Runtime.InteropServices;
 //      Build Number
 //      Revision
 //
-[assembly: AssemblyVersion("0.1.0.4")]
-[assembly: AssemblyFileVersion("0.1.0.4")]
+[assembly: AssemblyVersion("0.1.1.0")]
+[assembly: AssemblyFileVersion("0.1.1.0")]
 [assembly: NeutralResourcesLanguage("en-DE")]
